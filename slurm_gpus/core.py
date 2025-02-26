@@ -33,13 +33,65 @@ def run_scontrol():
         console.print(f"[bold red]Error parsing JSON output:[/bold red] {e}")
         sys.exit(1)
 
-def extract_gpu_memory_from_partition(partitions):
-    """Extract GPU memory from partition names like 'gpu-vram-12gb'"""
-    for partition in partitions:
-        match = re.search(r'gpu-vram-(\d+)gb', partition)
-        if match:
-            return int(match.group(1))
-    return None
+def get_gpu_memory_size(gpu_model, partitions=None):
+    """Get GPU memory size using internal dictionary or partition names.
+    
+    First tries to extract memory from partition names like 'gpu-vram-12gb',
+    then falls back to internal dictionary of known GPU models.
+    """
+    # Dictionary of known GPU models and their VRAM sizes in GB
+    gpu_memory_dict = {
+        # NVIDIA Gaming/Professional GPUs
+        "nvidia_geforce_rtx_2080_ti": 11,
+        "nvidia_geforce_rtx_3080": 10,
+        "nvidia_geforce_rtx_3090": 24,
+        "nvidia_geforce_rtx_4090": 24,
+        
+        # NVIDIA Quadro/RTX Professional GPUs
+        "nvidia_quadro_rtx_4000": 8,
+        "nvidia_quadro_rtx_5000": 16,
+        "nvidia_quadro_rtx_6000": 24,
+        "nvidia_quadro_rtx_8000": 48,
+        "nvidia_rtx_a2000": 6,
+        "nvidia_rtx_a4000": 16,
+        "nvidia_rtx_a5000": 24,
+        "nvidia_rtx_a6000": 48,
+        "nvidia_rtx_a8000": 48,
+        "nvidia_rtx_5000_ada_generation": 32,
+        "nvidia_rtx_6000_ada_generation": 48,
+        
+        # NVIDIA Data Center GPUs
+        "nvidia_a10": 24,
+        "nvidia_a30": 24,
+        "nvidia_a40": 48,
+        "nvidia_a100": 40,
+        "nvidia_a100_80gb": 80,
+        "nvidia_h100": 80,
+        "nvidia_h100_nvl": 94,  # NVL variant as per partitions
+        "nvidia_l4": 24,
+        "nvidia_l40": 48,
+        "nvidia_l40s": 48,
+        
+        # Older NVIDIA GPUs
+        "nvidia_tesla_k80": 12,
+        "nvidia_tesla_p4": 8,
+        "nvidia_tesla_p40": 24,
+        "nvidia_tesla_p100": 16,
+        "nvidia_tesla_v100": 32,
+        "nvidia_tesla_v100_32gb": 32,
+        "nvidia_tesla_t4": 16
+    }
+    
+    # First try to get memory from partition names
+    if partitions:
+        for partition in partitions:
+            match = re.search(r'gpu-vram-(\d+)gb', partition)
+            if match:
+                return int(match.group(1))
+    
+    # Fall back to the dictionary if memory not found in partition names
+    normalized_model = gpu_model.lower() if gpu_model else ""
+    return gpu_memory_dict.get(normalized_model)
 
 def parse_gpu_info(node_data):
     """Parse GPU information from a node's data"""
@@ -66,9 +118,9 @@ def parse_gpu_info(node_data):
         gpu_info["gpu_model"] = gres_match.group(1)
         gpu_info["total_gpus"] = int(gres_match.group(2))
     
-    # Extract memory from partition names
-    if "partitions" in node_data:
-        gpu_info["memory_per_gpu"] = extract_gpu_memory_from_partition(node_data["partitions"])
+    # Get memory size from partition names or fallback to built-in dictionary
+    partitions = node_data.get("partitions", [])
+    gpu_info["memory_per_gpu"] = get_gpu_memory_size(gpu_info["gpu_model"], partitions)
     
     # Extract allocated GPUs
     if "gres_used" in node_data and node_data["gres_used"]:
@@ -130,6 +182,7 @@ def display_gpu_info(gpu_data):
     summary_table.add_column("Total", style="blue")
     summary_table.add_column("Allocated", style="yellow")
     summary_table.add_column("Available", style="green")
+    summary_table.add_column("% Free", style="blue")
     
     # Group by GPU model and memory
     gpu_summary = {}
@@ -153,12 +206,28 @@ def display_gpu_info(gpu_data):
     for (model, memory), counts in sorted(gpu_summary.items()):
         model_display = model.replace("_", " ").title() if model else "Unknown"
         memory_str = f"{memory} GB" if memory else "Unknown"
+        
+        # Calculate percentage free
+        if counts["total"] > 0:
+            percent_free = (counts["available"] / counts["total"]) * 100
+            percent_str = f"{percent_free:.1f}%"
+            # Color-code the percentage
+            if percent_free > 75:
+                percent_display = f"[green]{percent_str}[/green]"
+            elif percent_free > 25:
+                percent_display = f"[yellow]{percent_str}[/yellow]"
+            else:
+                percent_display = f"[red]{percent_str}[/red]"
+        else:
+            percent_display = "N/A"
+            
         summary_table.add_row(
             model_display,
             memory_str,
             str(counts["total"]),
             f"[yellow]{counts['allocated']}[/yellow]",
-            f"[green]{counts['available']}[/green]"
+            f"[green]{counts['available']}[/green]",
+            percent_display
         )
     
     # Create detailed table
@@ -203,6 +272,17 @@ def display_gpu_info(gpu_data):
 
 def main():
     """Main function"""
+    console = Console()
+    
+    # Show script header
+    console.print(Panel.fit(
+        Text("GPU Status Viewer", style="bold cyan", justify="center"),
+        subtitle="Displays available and allocated GPUs on SLURM cluster",
+        border_style="green"
+    ))
+    
+    console.print("[yellow]Fetching node data from SLURM...[/yellow]")
+    
     # Get node data from scontrol
     data = run_scontrol()
     
@@ -214,9 +294,14 @@ def main():
             gpu_data.append(gpu_info)
     
     if not gpu_data:
-        console = Console()
         console.print("[bold yellow]No GPU nodes found in the cluster.[/bold yellow]")
         sys.exit(0)
+    
+    # Count total GPUs
+    total_gpus = sum(gpu["total_gpus"] for gpu in gpu_data if gpu)
+    available_gpus = sum(gpu["available_gpus"] for gpu in gpu_data if gpu)
+    
+    console.print(f"[green]Found [bold]{total_gpus}[/bold] GPUs across [bold]{len(gpu_data)}[/bold] nodes, [bold]{available_gpus}[/bold] available.[/green]")
     
     # Display GPU information
     display_gpu_info(gpu_data)
