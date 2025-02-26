@@ -1,0 +1,14 @@
+LICENSE
+MANIFEST.in
+README.md
+pyproject.toml
+setup.py
+slurm_gpus/__init__.py
+slurm_gpus/__main__.py
+slurm_gpus/core.py
+slurm_gpus.egg-info/PKG-INFO
+slurm_gpus.egg-info/SOURCES.txt
+slurm_gpus.egg-info/dependency_links.txt
+slurm_gpus.egg-info/entry_points.txt
+slurm_gpus.egg-info/requires.txt
+slurm_gpus.egg-info/top_level.txt
