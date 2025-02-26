@@ -1,2 +1,0 @@
-[console_scripts]
-slurm-gpus = slurm_gpus.core:main
