@@ -7,7 +7,7 @@ A simple tool to list availability of GPUs on your SLURM cluster.
 You can install the package directly from GitHub:
 
 ```bash
-pip install git+https://github.com/original-author/slurm-gpus.git
+pip install git+https://github.com/rexhaif/slurm-gpus.git
 ```
 
 Or if you have downloaded the source code:
