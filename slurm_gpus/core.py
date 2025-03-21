@@ -10,7 +10,10 @@ from rich.panel import Panel
 from rich.text import Text
 
 def run_scontrol():
-    """Run scontrol command and return its JSON output"""
+    """Run scontrol command and return its output, trying JSON first, then plain text"""
+    console = Console()
+    
+    # First try with JSON format (newer SLURM versions)
     try:
         result = subprocess.run(
             ["scontrol", "show", "nodes", "--json"],
@@ -18,20 +21,93 @@ def run_scontrol():
             text=True,
             check=True
         )
-        return json.loads(result.stdout)
+        data = json.loads(result.stdout)
+        return {"format": "json", "data": data}
+    except subprocess.CalledProcessError as e:
+        if "invalid option" in e.stderr.lower() or "unrecognized option" in e.stderr.lower():
+            # JSON format not supported, try plain text
+            console.print("[yellow]JSON format not supported, falling back to plain text parsing...[/yellow]")
+        else:
+            console.print(f"[bold red]Error running scontrol:[/bold red] {e}")
+            console.print(f"stderr: {e.stderr}")
+            sys.exit(1)
+    except json.JSONDecodeError as e:
+        console.print(f"[bold red]Error parsing JSON output:[/bold red] {e}")
+        console.print("[yellow]Falling back to plain text parsing...[/yellow]")
     except FileNotFoundError:
-        console = Console()
         console.print("[bold red]Error:[/bold red] scontrol command not found. Please ensure SLURM is installed and in your PATH.")
         sys.exit(1)
+    
+    # Fall back to plain text format (older SLURM versions)
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "nodes"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return {"format": "text", "data": result.stdout}
     except subprocess.CalledProcessError as e:
-        console = Console()
-        console.print(f"[bold red]Error running scontrol:[/bold red] {e}")
+        console.print(f"[bold red]Error running scontrol in plain text mode:[/bold red] {e}")
         console.print(f"stderr: {e.stderr}")
         sys.exit(1)
-    except json.JSONDecodeError as e:
-        console = Console()
-        console.print(f"[bold red]Error parsing JSON output:[/bold red] {e}")
+    except FileNotFoundError:
+        console.print("[bold red]Error:[/bold red] scontrol command not found. Please ensure SLURM is installed and in your PATH.")
         sys.exit(1)
+
+def parse_plain_text_output(text_output):
+    """Parse plain text output from scontrol and convert to structured format"""
+    nodes = []
+    
+    # Split by NodeName= to get individual node blocks
+    # Add 'NodeName=' back to each block except the first empty one
+    node_blocks = text_output.split("NodeName=")
+    node_blocks = [block for block in node_blocks if block.strip()]
+    
+    for block in node_blocks:
+        node_data = {}
+        
+        # Extract node name (first part of the block before space)
+        node_name_match = re.match(r'([^\s]+)', block)
+        if node_name_match:
+            node_data["name"] = node_name_match.group(1)
+        
+        # Extract state
+        state_match = re.search(r'State=(\S+)', block)
+        if state_match:
+            # Store state as a list to match JSON format
+            node_data["state"] = [state_match.group(1)]
+        
+        # Extract partitions
+        partitions_match = re.search(r'Partitions=(\S+)', block)
+        if partitions_match:
+            node_data["partitions"] = partitions_match.group(1).split(",")
+        
+        # Extract GPU information from Gres
+        gres_match = re.search(r'Gres=([^\n]+)', block)
+        if gres_match and "gpu:" in gres_match.group(1):
+            node_data["gres"] = gres_match.group(1)
+        
+        # Extract allocated GPU information
+        tres_match = re.search(r'AllocTRES=([^\n]+)', block)
+        if tres_match and "gres/gpu" in tres_match.group(1):
+            node_data["gres_used"] = tres_match.group(1)
+            
+            # Try to extract GPU indexes from the block
+            gpu_idx_match = re.search(r'gpu:[^:]+:\d+\(IDX:([^)]+)\)', block)
+            if gpu_idx_match:
+                # Create a fake gres_used with IDX format for compatibility
+                gpu_model_match = re.search(r'gpu:([^:]+):', node_data["gres"])
+                gpu_count_match = re.search(r'gpu:[^:]+:(\d+)', node_data["gres"])
+                
+                if gpu_model_match and gpu_count_match:
+                    model = gpu_model_match.group(1)
+                    count = gpu_count_match.group(1)
+                    node_data["gres_used"] = f"gpu:{model}:{count}(IDX:{gpu_idx_match.group(1)})"
+        
+        nodes.append(node_data)
+    
+    return {"nodes": nodes}
 
 def get_gpu_memory_size(gpu_model, partitions=None):
     """Get GPU memory size using internal dictionary or partition names.
@@ -79,7 +155,22 @@ def get_gpu_memory_size(gpu_model, partitions=None):
         "nvidia_tesla_p100": 16,
         "nvidia_tesla_v100": 32,
         "nvidia_tesla_v100_32gb": 32,
-        "nvidia_tesla_t4": 16
+        "nvidia_tesla_t4": 16,
+        
+        # Add common GPU models without nvidia_ prefix for plain text output
+        "a100": 40,
+        "a100_80gb": 80,
+        "v100": 32,
+        "v100_32gb": 32,
+        "p100": 16,
+        "t4": 16,
+        "a10": 24,
+        "a30": 24,
+        "a40": 48,
+        "h100": 80,
+        "l4": 24,
+        "l40": 48,
+        "l40s": 48
     }
     
     # First try to get memory from partition names
@@ -123,19 +214,43 @@ def parse_gpu_info(node_data):
     gpu_info["memory_per_gpu"] = get_gpu_memory_size(gpu_info["gpu_model"], partitions)
     
     # Extract allocated GPUs
+    allocated_gpus = 0
     if "gres_used" in node_data and node_data["gres_used"]:
-        used_match = re.search(r'gpu:[^:]+:\d+\(IDX:([^)]+)\)', node_data["gres_used"])
+        # Try to extract directly from gres_used
+        used_match = re.search(r'gpu:[^:]+:(\d+)', node_data["gres_used"])
         if used_match:
-            idx_str = used_match.group(1)
+            allocated_gpus = int(used_match.group(1))
+        
+        # Try to extract GPU indexes
+        idx_match = re.search(r'IDX:([^)]+)', node_data["gres_used"])
+        if idx_match:
+            idx_str = idx_match.group(1)
             # Parse individual indexes or ranges like 0-3
             for part in idx_str.split(','):
                 if '-' in part:
                     start, end = map(int, part.split('-'))
                     gpu_info["allocated_indexes"].extend(list(range(start, end + 1)))
                 else:
-                    gpu_info["allocated_indexes"].append(int(part))
+                    try:
+                        gpu_info["allocated_indexes"].append(int(part))
+                    except ValueError:
+                        pass  # Skip if not a valid integer
+        
+        # If we have specific indexes, count them; otherwise use the extracted count
+        if gpu_info["allocated_indexes"]:
+            allocated_gpus = len(gpu_info["allocated_indexes"])
+        
+        # Alternative extraction for older formats
+        if not gpu_info["allocated_indexes"] and "gres/gpu=" in node_data["gres_used"]:
+            alloc_match = re.search(r'gres/gpu=(\d+)', node_data["gres_used"])
+            if alloc_match:
+                allocated_gpus = int(alloc_match.group(1))
+                
+                # If we have allocated GPUs but no indexes, assume they're the first n GPUs
+                if allocated_gpus > 0:
+                    gpu_info["allocated_indexes"] = list(range(min(allocated_gpus, gpu_info["total_gpus"])))
     
-    gpu_info["allocated_gpus"] = len(gpu_info["allocated_indexes"])
+    gpu_info["allocated_gpus"] = allocated_gpus if allocated_gpus > 0 else len(gpu_info["allocated_indexes"])
     
     # Calculate available GPUs and their indexes
     all_indexes = set(range(gpu_info["total_gpus"]))
@@ -284,7 +399,14 @@ def main():
     console.print("[yellow]Fetching node data from SLURM...[/yellow]")
     
     # Get node data from scontrol
-    data = run_scontrol()
+    result = run_scontrol()
+    
+    # Process data based on format
+    if result["format"] == "json":
+        data = result["data"]
+    else:
+        # Parse plain text output
+        data = parse_plain_text_output(result["data"])
     
     # Parse GPU information from each node
     gpu_data = []
@@ -305,3 +427,6 @@ def main():
     
     # Display GPU information
     display_gpu_info(gpu_data)
+
+if __name__ == "__main__":
+    main()
