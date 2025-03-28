@@ -225,16 +225,21 @@ def parse_gpu_info(node_data):
         idx_match = re.search(r'IDX:([^)]+)', node_data["gres_used"])
         if idx_match:
             idx_str = idx_match.group(1)
-            # Parse individual indexes or ranges like 0-3
-            for part in idx_str.split(','):
-                if '-' in part:
-                    start, end = map(int, part.split('-'))
-                    gpu_info["allocated_indexes"].extend(list(range(start, end + 1)))
-                else:
-                    try:
-                        gpu_info["allocated_indexes"].append(int(part))
-                    except ValueError:
-                        pass  # Skip if not a valid integer
+            # Skip if it's N/A
+            if idx_str.strip() != "N/A":
+                # Parse individual indexes or ranges like 0-3
+                for part in idx_str.split(','):
+                    if '-' in part:
+                        try:
+                            start, end = map(int, part.split('-'))
+                            gpu_info["allocated_indexes"].extend(list(range(start, end + 1)))
+                        except ValueError:
+                            pass  # Skip if not valid integers
+                    else:
+                        try:
+                            gpu_info["allocated_indexes"].append(int(part))
+                        except ValueError:
+                            pass  # Skip if not a valid integer
         
         # If we have specific indexes, count them; otherwise use the extracted count
         if gpu_info["allocated_indexes"]:
