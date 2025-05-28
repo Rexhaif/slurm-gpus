@@ -143,6 +143,7 @@ def get_gpu_memory_size(gpu_model, partitions=None):
         "nvidia_a100": 40,
         "nvidia_a100_80gb": 80,
         "nvidia_h100": 80,
+        "nvidia_h200": 141,
         "nvidia_h100_nvl": 94,  # NVL variant as per partitions
         "nvidia_l4": 24,
         "nvidia_l40": 48,
@@ -167,7 +168,8 @@ def get_gpu_memory_size(gpu_model, partitions=None):
         "a10": 24,
         "a30": 24,
         "a40": 48,
-        "h100": 80,
+        "h100": 94,
+        "h200": 141,
         "l4": 24,
         "l40": 48,
         "l40s": 48
